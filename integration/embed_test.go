@@ -641,3 +641,130 @@ func TestEmbedStatusCode(t *testing.T) {
 		})
 	}
 }
+
+// TestBGEM3SparseEmbeddings tests that BGE-M3 returns sparse embeddings
+// in addition to dense embeddings.
+func TestBGEM3SparseEmbeddings(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	client, _, cleanup := InitServerConnection(ctx, t)
+	defer cleanup()
+
+	req := api.EmbedRequest{
+		Model: "bge-m3",
+		Input: "What is BGP routing protocol?",
+	}
+
+	res, err := embedTestHelper(ctx, client, t, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Check dense embeddings are present
+	if len(res.Embeddings) != 1 {
+		t.Fatalf("expected 1 embedding, got %d", len(res.Embeddings))
+	}
+
+	// BGE-M3 produces 1024-dimensional dense embeddings
+	if len(res.Embeddings[0]) != 1024 {
+		t.Fatalf("expected 1024 floats for dense embedding, got %d", len(res.Embeddings[0]))
+	}
+
+	// Check sparse embeddings are present
+	if len(res.SparseEmbeddings) != 1 {
+		t.Fatalf("expected 1 sparse embedding, got %d", len(res.SparseEmbeddings))
+	}
+
+	sparse := res.SparseEmbeddings[0]
+	if len(sparse) == 0 {
+		t.Fatal("expected non-empty sparse embedding")
+	}
+
+	// Verify sparse embedding entries have expected structure
+	for _, entry := range sparse {
+		if entry.Token == 0 && entry.Name == "" {
+			t.Error("sparse entry should have token ID or name")
+		}
+		if entry.Weight <= 0 {
+			t.Errorf("sparse weight should be positive, got %f", entry.Weight)
+		}
+	}
+
+	t.Logf("Got %d sparse embedding entries", len(sparse))
+
+	// Log a few sample entries for debugging
+	for i, entry := range sparse {
+		if i >= 5 {
+			break
+		}
+		t.Logf("  token=%d name=%q weight=%f", entry.Token, entry.Name, entry.Weight)
+	}
+}
+
+// TestBGEM3SparseEmbeddingsBatch tests sparse embeddings with batch input.
+func TestBGEM3SparseEmbeddingsBatch(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	client, _, cleanup := InitServerConnection(ctx, t)
+	defer cleanup()
+
+	req := api.EmbedRequest{
+		Model: "bge-m3",
+		Input: []string{
+			"The cat sat on the mat",
+			"Machine learning is fascinating",
+		},
+	}
+
+	res, err := embedTestHelper(ctx, client, t, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Check dense embeddings
+	if len(res.Embeddings) != 2 {
+		t.Fatalf("expected 2 embeddings, got %d", len(res.Embeddings))
+	}
+
+	// Check sparse embeddings
+	if len(res.SparseEmbeddings) != 2 {
+		t.Fatalf("expected 2 sparse embeddings, got %d", len(res.SparseEmbeddings))
+	}
+
+	// Each sparse embedding should have entries
+	for i, sparse := range res.SparseEmbeddings {
+		if len(sparse) == 0 {
+			t.Errorf("sparse embedding %d should not be empty", i)
+		}
+		t.Logf("Input %d has %d sparse entries", i, len(sparse))
+	}
+}
+
+// TestNonSparseModelNoSparseEmbeddings verifies that models without sparse
+// support don't return sparse_embeddings field (backward compatibility).
+func TestNonSparseModelNoSparseEmbeddings(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	client, _, cleanup := InitServerConnection(ctx, t)
+	defer cleanup()
+
+	req := api.EmbedRequest{
+		Model: "all-minilm",
+		Input: "test input",
+	}
+
+	res, err := embedTestHelper(ctx, client, t, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Dense embeddings should be present
+	if len(res.Embeddings) != 1 {
+		t.Fatalf("expected 1 embedding, got %d", len(res.Embeddings))
+	}
+
+	// Sparse embeddings should be nil/empty for non-sparse models
+	if len(res.SparseEmbeddings) > 0 {
+		t.Errorf("expected no sparse embeddings for all-minilm, got %d", len(res.SparseEmbeddings))
+	}
+}
