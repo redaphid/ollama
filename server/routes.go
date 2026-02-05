@@ -859,14 +859,14 @@ func (s *Server) EmbeddingsHandler(c *gin.Context) {
 		return
 	}
 
-	resp, err := r.Embedding(c.Request.Context(), req.Prompt)
+	embResp, err := r.Embedding(c.Request.Context(), req.Prompt)
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": strings.TrimSpace(err.Error())})
 		return
 	}
 
 	var e []float64
-	for _, v := range resp.Embedding {
+	for _, v := range embResp.Embedding {
 		e = append(e, float64(v))
 	}
 
