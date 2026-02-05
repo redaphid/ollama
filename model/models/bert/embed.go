@@ -146,10 +146,10 @@ type Options struct {
 	numKVHeads,
 	keyLength,
 	valueLength int
-	poolingType          pooling.Type
-	eps                  float32
-	normalize            bool
-	hasSparseEmbeddings  bool
+	poolingType         pooling.Type
+	eps                 float32
+	normalize           bool
+	hasSparseEmbeddings bool
 }
 
 func (o Options) headDim() int {

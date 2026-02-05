@@ -631,9 +631,9 @@ type EmbedRequest struct {
 
 // SparseEmbeddingEntry represents a single sparse embedding entry with token info.
 type SparseEmbeddingEntry struct {
-	Token  int32   `json:"token"`            // vocabulary token ID
-	Name   string  `json:"name,omitempty"`   // decoded token text
-	Weight float32 `json:"weight"`           // ReLU'd weight from sparse linear projection
+	Token  int32   `json:"token"`          // vocabulary token ID
+	Name   string  `json:"name,omitempty"` // decoded token text
+	Weight float32 `json:"weight"`         // ReLU'd weight from sparse linear projection
 }
 
 // EmbedResponse is the response from [Client.Embed].
