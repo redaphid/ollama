@@ -21,13 +21,16 @@ type Model struct {
 	PositionEmbedding  *nn.Embedding `gguf:"position_embd"`
 	TokenEmbeddingNorm *nn.LayerNorm `gguf:"token_embd_norm"`
 
+	SparseLinear *nn.Linear `gguf:"sparse_linear"`
+
 	Layers []EncoderLayer `gguf:"blk"`
 
 	Options
 }
 
-// Forward implements model.Model.
-func (m *Model) Forward(ctx ml.Context, batch input.Batch) (ml.Tensor, error) {
+// encode runs token embeddings through the transformer layers, returning
+// the full hidden states before pooling (shape [hiddenSize, nTokens]).
+func (m *Model) encode(ctx ml.Context, batch input.Batch) ml.Tensor {
 	hiddenStates := m.TokenEmbedding.Forward(ctx, batch.Inputs)
 	hiddenStates = hiddenStates.Add(ctx, m.TypeEmbedding.Weight.Slice(ctx, 1, 0, 1, 1))
 	hiddenStates = hiddenStates.Add(ctx, m.PositionEmbedding.Forward(ctx, ctx.Input().FromInts(batch.Positions, len(batch.Positions))))
@@ -37,12 +40,36 @@ func (m *Model) Forward(ctx ml.Context, batch input.Batch) (ml.Tensor, error) {
 		hiddenStates = layer.Forward(ctx, hiddenStates, &m.Options)
 	}
 
-	hiddenStates = m.poolingType.Forward(ctx, hiddenStates)
+	return hiddenStates
+}
+
+// Forward implements model.Model.
+func (m *Model) Forward(ctx ml.Context, batch input.Batch) (ml.Tensor, error) {
+	hiddenStates := m.encode(ctx, batch)
+
+	// Dense pooled embedding
+	pooled := m.poolingType.Forward(ctx, hiddenStates)
 	if m.normalize {
-		hiddenStates = hiddenStates.L2Norm(ctx, 1e-12)
+		pooled = pooled.L2Norm(ctx, 1e-12)
 	}
 
-	return hiddenStates, nil
+	// If sparse linear layer is present, compute per-token sparse weights
+	// and concatenate them after the dense embedding so the runner can split them.
+	if m.SparseLinear != nil {
+		// sparseWeights shape: [1, nTokens] (one scalar per token)
+		sparseWeights := m.SparseLinear.Forward(ctx, hiddenStates).RELU(ctx)
+		// Reshape to [nTokens] for concatenation
+		nTokens := sparseWeights.Dim(1)
+		sparseWeights = sparseWeights.Reshape(ctx, nTokens)
+		// Reshape pooled to [hiddenSize] for concatenation
+		pooled = pooled.Reshape(ctx, m.hiddenSize)
+		// Concatenate: [dense..., sparse_weights...]
+		pooled = pooled.Concat(ctx, sparseWeights, 0)
+		// Reshape back to [hiddenSize + nTokens, 1] for the runner
+		pooled = pooled.Reshape(ctx, m.hiddenSize+nTokens, 1)
+	}
+
+	return pooled, nil
 }
 
 type EncoderLayer struct {
@@ -119,9 +146,10 @@ type Options struct {
 	numKVHeads,
 	keyLength,
 	valueLength int
-	poolingType pooling.Type
-	eps         float32
-	normalize   bool
+	poolingType         pooling.Type
+	eps                 float32
+	normalize           bool
+	hasSparseEmbeddings bool
 }
 
 func (o Options) headDim() int {
@@ -165,12 +193,13 @@ func New(c fs.Config) (model.Model, error) {
 		TextProcessor: processor,
 		Layers:        make([]EncoderLayer, c.Uint("block_count")),
 		Options: Options{
-			hiddenSize:  int(c.Uint("embedding_length")),
-			numHeads:    int(c.Uint("attention.head_count")),
-			numKVHeads:  int(c.Uint("attention.head_count_kv")),
-			eps:         c.Float("attention.layer_norm_epsilon"),
-			poolingType: pooling.Type(c.Uint("pooling_type")),
-			normalize:   c.Bool("normalize_embeddings", true),
+			hiddenSize:          int(c.Uint("embedding_length")),
+			numHeads:            int(c.Uint("attention.head_count")),
+			numKVHeads:          int(c.Uint("attention.head_count_kv")),
+			eps:                 c.Float("attention.layer_norm_epsilon"),
+			poolingType:         pooling.Type(c.Uint("pooling_type")),
+			normalize:           c.Bool("normalize_embeddings", true),
+			hasSparseEmbeddings: c.Bool("has_sparse_embeddings", false),
 		},
 	}, nil
 }

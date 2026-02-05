@@ -699,23 +699,23 @@ func (s *Server) EmbedHandler(c *gin.Context) {
 
 	ctx := c.Request.Context()
 
-	embedWithRetry := func(text string) ([]float32, int, error) {
-		emb, tokCount, err := r.Embedding(ctx, text)
+	embedWithRetry := func(text string) (*llm.EmbeddingResponse, error) {
+		resp, err := r.Embedding(ctx, text)
 		if err == nil {
-			return emb, tokCount, nil
+			return resp, nil
 		}
 
 		var serr api.StatusError
 		if !errors.As(err, &serr) || serr.StatusCode != http.StatusBadRequest {
-			return nil, 0, err
+			return nil, err
 		}
 		if req.Truncate != nil && !*req.Truncate {
-			return nil, 0, err
+			return nil, err
 		}
 
 		tokens, err := r.Tokenize(ctx, text)
 		if err != nil {
-			return nil, 0, err
+			return nil, err
 		}
 
 		// TODO @nicolepardal: avoid reaching into kvData here; pass required tokenizer metadata via model/options instead
@@ -728,29 +728,31 @@ func (s *Server) EmbedHandler(c *gin.Context) {
 		}
 
 		if len(tokens) <= ctxLen {
-			return nil, 0, fmt.Errorf("input exceeds maximum context length and cannot be truncated further")
+			return nil, fmt.Errorf("input exceeds maximum context length and cannot be truncated further")
 		}
 		if ctxLen <= 0 {
-			return nil, 0, fmt.Errorf("input after truncation exceeds maximum context length")
+			return nil, fmt.Errorf("input after truncation exceeds maximum context length")
 		}
 
 		truncatedTokens := tokens[:ctxLen]
 		truncated, err := r.Detokenize(ctx, truncatedTokens)
 		if err != nil {
-			return nil, 0, err
+			return nil, err
 		}
 		return r.Embedding(ctx, truncated)
 	}
 
 	var g errgroup.Group
 	embeddings := make([][]float32, len(input))
+	sparseEmbeddings := make([][]api.SparseEmbeddingEntry, len(input))
 	var totalTokens uint64
 	for i, text := range input {
 		g.Go(func() error {
-			embedding, tokenCount, err := embedWithRetry(text)
+			resp, err := embedWithRetry(text)
 			if err != nil {
 				return err
 			}
+			embedding := resp.Embedding
 			// TODO: this first normalization should be done by the model
 			embedding, err = normalize(embedding)
 			if err != nil {
@@ -763,7 +765,20 @@ func (s *Server) EmbedHandler(c *gin.Context) {
 				}
 			}
 			embeddings[i] = embedding
-			atomic.AddUint64(&totalTokens, uint64(tokenCount))
+			atomic.AddUint64(&totalTokens, uint64(resp.PromptEvalCount))
+
+			// Collect sparse embedding if present (each goroutine writes to its own index)
+			if len(resp.SparseEmbedding) > 0 {
+				entries := make([]api.SparseEmbeddingEntry, len(resp.SparseEmbedding))
+				for j, e := range resp.SparseEmbedding {
+					entries[j] = api.SparseEmbeddingEntry{
+						Token:  e.Token,
+						Name:   e.Name,
+						Weight: e.Weight,
+					}
+				}
+				sparseEmbeddings[i] = entries
+			}
 			return nil
 		})
 	}
@@ -789,6 +804,13 @@ func (s *Server) EmbedHandler(c *gin.Context) {
 		TotalDuration:   time.Since(checkpointStart),
 		LoadDuration:    checkpointLoaded.Sub(checkpointStart),
 		PromptEvalCount: int(totalTokens),
+	}
+	// Include sparse embeddings only if any were returned
+	for _, se := range sparseEmbeddings {
+		if len(se) > 0 {
+			resp.SparseEmbeddings = sparseEmbeddings
+			break
+		}
 	}
 	c.JSON(http.StatusOK, resp)
 }
@@ -837,14 +859,14 @@ func (s *Server) EmbeddingsHandler(c *gin.Context) {
 		return
 	}
 
-	embedding, _, err := r.Embedding(c.Request.Context(), req.Prompt)
+	embResp, err := r.Embedding(c.Request.Context(), req.Prompt)
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": strings.TrimSpace(err.Error())})
 		return
 	}
 
 	var e []float64
-	for _, v := range embedding {
+	for _, v := range embResp.Embedding {
 		e = append(e, float64(v))
 	}
 

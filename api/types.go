@@ -629,10 +629,22 @@ type EmbedRequest struct {
 	Options map[string]any `json:"options"`
 }
 
+// SparseEmbeddingEntry represents a single sparse embedding entry with token info.
+type SparseEmbeddingEntry struct {
+	Token  int32   `json:"token"`          // vocabulary token ID
+	Name   string  `json:"name,omitempty"` // decoded token text
+	Weight float32 `json:"weight"`         // ReLU'd weight from sparse linear projection
+}
+
 // EmbedResponse is the response from [Client.Embed].
 type EmbedResponse struct {
 	Model      string      `json:"model"`
 	Embeddings [][]float32 `json:"embeddings"`
+
+	// SparseEmbeddings contains sparse lexical weight entries for models that support
+	// sparse embeddings (e.g. BGE-M3). Each entry includes token ID, decoded name, and weight.
+	// Omitted for models without sparse embedding support.
+	SparseEmbeddings [][]SparseEmbeddingEntry `json:"sparse_embeddings,omitempty"`
 
 	TotalDuration   time.Duration `json:"total_duration,omitempty"`
 	LoadDuration    time.Duration `json:"load_duration,omitempty"`
