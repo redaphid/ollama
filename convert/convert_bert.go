@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"encoding/json"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -30,7 +31,9 @@ type bertModel struct {
 	NormEpsilon           float32 `json:"norm_epsilon"`
 	normalizeEmbeddings   bool
 
-	PoolingType uint32
+	PoolingType         uint32
+	hasSparseEmbeddings bool
+	sparseTensors       []Tensor
 }
 
 var (
@@ -85,6 +88,18 @@ func (p *bertModel) parseMore(fsys fs.FS) error {
 		}
 	}
 
+	// Load sparse_linear.pt if present (e.g. BGE-M3 sparse embeddings)
+	if _, err := fs.Stat(fsys, "sparse_linear.pt"); err == nil {
+		sparseTensors, err := loadSparsePT(fsys)
+		if err != nil {
+			return err
+		}
+		if len(sparseTensors) > 0 {
+			p.hasSparseEmbeddings = true
+			p.sparseTensors = sparseTensors
+		}
+	}
+
 	return nil
 }
 
@@ -94,6 +109,9 @@ func (p *bertModel) KV(t *Tokenizer) KV {
 	kv["bert.attention.causal"] = false
 	kv["bert.pooling_type"] = p.PoolingType
 	kv["bert.normalize_embeddings"] = p.normalizeEmbeddings
+	if p.hasSparseEmbeddings {
+		kv["bert.has_sparse_embeddings"] = true
+	}
 
 	kv["bert.block_count"] = cmp.Or(p.NLayers, p.NumHiddenLayers, p.NLayer)
 
@@ -155,7 +173,44 @@ func (p *bertModel) Tensors(ts []Tensor) []*ggml.Tensor {
 		})
 	}
 
+	for _, t := range p.sparseTensors {
+		out = append(out, &ggml.Tensor{
+			Name:     t.Name(),
+			Kind:     t.Kind(),
+			Shape:    t.Shape(),
+			WriterTo: t,
+		})
+	}
+
 	return out
+}
+
+// loadSparsePT loads sparse_linear.pt from the model directory via fs.FS.
+// Since pytorch.Load requires a real filesystem path, we copy the file
+// to a temp location first (sparse_linear.pt is typically ~3.5 kB).
+func loadSparsePT(fsys fs.FS) ([]Tensor, error) {
+	data, err := fs.ReadFile(fsys, "sparse_linear.pt")
+	if err != nil {
+		return nil, err
+	}
+
+	tmp, err := os.CreateTemp("", "sparse_linear-*.pt")
+	if err != nil {
+		return nil, err
+	}
+	defer os.Remove(tmp.Name())
+	defer tmp.Close()
+
+	if _, err := tmp.Write(data); err != nil {
+		return nil, err
+	}
+	if err := tmp.Close(); err != nil {
+		return nil, err
+	}
+
+	// Map "linear.weight" -> "sparse_linear.weight", "linear.bias" -> "sparse_linear.bias"
+	replacer := strings.NewReplacer("linear.", "sparse_linear.")
+	return parseTorch(fsys, replacer, tmp.Name())
 }
 
 func (bertModel) Replacements() []string {

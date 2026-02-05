@@ -47,6 +47,12 @@ type response struct {
 	logprobs []llm.Logprob
 }
 
+// embeddingResult holds both dense and optional sparse embedding data.
+type embeddingResult struct {
+	dense  []float32
+	sparse map[int32]float32 // token_id -> weight, nil if no sparse support
+}
+
 type Sequence struct {
 	// ctxs are used for allocating tensors that last the lifetime of the sequence, such as
 	// multimodal embeddings
@@ -86,7 +92,7 @@ type Sequence struct {
 	sampler sample.Sampler
 
 	// channel to send back the embedding if embedding only
-	embedding chan []float32
+	embedding chan embeddingResult
 
 	// stop sequences
 	stop []string
@@ -198,7 +204,7 @@ func (s *Server) NewSequence(prompt string, images []llm.ImageData, params NewSe
 		pendingResponses: make([]string, 0),
 		responses:        make(chan response, 100),
 		quit:             make(chan bool, 1),
-		embedding:        make(chan []float32, 1),
+		embedding:        make(chan embeddingResult, 1),
 		sampler:          params.sampler,
 		embeddingOnly:    params.embedding,
 		stop:             params.stop,
@@ -747,7 +753,35 @@ func (s *Server) computeBatch(activeBatch batchState) {
 
 		// if done processing the prompt, generate an embedding and return
 		if seq.embeddingOnly {
-			seq.embedding <- outputs
+			result := embeddingResult{dense: outputs}
+
+			// Check if the model has sparse embedding support
+			hiddenSize := int(s.model.Backend().Config().Uint("embedding_length"))
+			if s.model.Backend().Config().Bool("has_sparse_embeddings", false) && len(outputs) > hiddenSize {
+				result.dense = outputs[:hiddenSize]
+				sparseWeights := outputs[hiddenSize:]
+
+				// Build token_id -> max(weight) map from the sparse weights.
+				// Each weight corresponds to a token in the sequence inputs.
+				sparseMap := make(map[int32]float32)
+				for j, w := range sparseWeights {
+					if w <= 0 {
+						continue
+					}
+					var tokenID int32
+					if j < len(seq.cache.Inputs) {
+						tokenID = seq.cache.Inputs[j].Token
+					}
+					if existing, ok := sparseMap[tokenID]; !ok || w > existing {
+						sparseMap[tokenID] = w
+					}
+				}
+				if len(sparseMap) > 0 {
+					result.sparse = sparseMap
+				}
+			}
+
+			seq.embedding <- result
 			s.removeSequence(i, llm.DoneReasonStop)
 			continue
 		}
@@ -1047,8 +1081,10 @@ func (s *Server) embeddings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	result := <-seq.embedding
 	if err := json.NewEncoder(w).Encode(&llm.EmbeddingResponse{
-		Embedding:       <-seq.embedding,
+		Embedding:       result.dense,
+		SparseEmbedding: result.sparse,
 		PromptEvalCount: seq.numPromptInputs,
 	}); err != nil {
 		http.Error(w, fmt.Sprintf("failed to encode response: %v", err), http.StatusInternalServerError)

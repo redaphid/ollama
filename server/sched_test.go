@@ -780,8 +780,11 @@ func (s *mockLlm) Completion(ctx context.Context, req llm.CompletionRequest, fn 
 	return s.completionResp
 }
 
-func (s *mockLlm) Embedding(ctx context.Context, input string) ([]float32, int, error) {
-	return s.embeddingResp, 0, s.embeddingRespErr
+func (s *mockLlm) Embedding(ctx context.Context, input string) (*llm.EmbeddingResponse, error) {
+	if s.embeddingRespErr != nil {
+		return nil, s.embeddingRespErr
+	}
+	return &llm.EmbeddingResponse{Embedding: s.embeddingResp}, nil
 }
 
 func (s *mockLlm) Tokenize(ctx context.Context, content string) ([]int, error) {

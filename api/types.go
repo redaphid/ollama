@@ -634,6 +634,11 @@ type EmbedResponse struct {
 	Model      string      `json:"model"`
 	Embeddings [][]float32 `json:"embeddings"`
 
+	// SparseEmbeddings contains sparse lexical weight maps for models that support
+	// sparse embeddings (e.g. BGE-M3). Each map entry is token_id (as string) -> weight.
+	// Omitted for models without sparse embedding support.
+	SparseEmbeddings []map[string]float32 `json:"sparse_embeddings,omitempty"`
+
 	TotalDuration   time.Duration `json:"total_duration,omitempty"`
 	LoadDuration    time.Duration `json:"load_duration,omitempty"`
 	PromptEvalCount int           `json:"prompt_eval_count,omitempty"`
