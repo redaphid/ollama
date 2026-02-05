@@ -21,7 +21,6 @@ import (
 	"os"
 	"os/signal"
 	"slices"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -745,7 +744,7 @@ func (s *Server) EmbedHandler(c *gin.Context) {
 
 	var g errgroup.Group
 	embeddings := make([][]float32, len(input))
-	sparseEmbeddings := make([]map[string]float32, len(input))
+	sparseEmbeddings := make([][]api.SparseEmbeddingEntry, len(input))
 	var totalTokens uint64
 	for i, text := range input {
 		g.Go(func() error {
@@ -769,12 +768,16 @@ func (s *Server) EmbedHandler(c *gin.Context) {
 			atomic.AddUint64(&totalTokens, uint64(resp.PromptEvalCount))
 
 			// Collect sparse embedding if present (each goroutine writes to its own index)
-			if resp.SparseEmbedding != nil {
-				sparse := make(map[string]float32, len(resp.SparseEmbedding))
-				for tokenID, weight := range resp.SparseEmbedding {
-					sparse[strconv.FormatInt(int64(tokenID), 10)] = weight
+			if len(resp.SparseEmbedding) > 0 {
+				entries := make([]api.SparseEmbeddingEntry, len(resp.SparseEmbedding))
+				for j, e := range resp.SparseEmbedding {
+					entries[j] = api.SparseEmbeddingEntry{
+						Token:  e.Token,
+						Name:   e.Name,
+						Weight: e.Weight,
+					}
 				}
-				sparseEmbeddings[i] = sparse
+				sparseEmbeddings[i] = entries
 			}
 			return nil
 		})
@@ -804,7 +807,7 @@ func (s *Server) EmbedHandler(c *gin.Context) {
 	}
 	// Include sparse embeddings only if any were returned
 	for _, se := range sparseEmbeddings {
-		if se != nil {
+		if len(se) > 0 {
 			resp.SparseEmbeddings = sparseEmbeddings
 			break
 		}

@@ -47,10 +47,17 @@ type response struct {
 	logprobs []llm.Logprob
 }
 
+// sparseEntry represents a single sparse embedding entry with token info.
+type sparseEntry struct {
+	Token  int32   // vocabulary token ID
+	Name   string  // decoded token text
+	Weight float32 // ReLU'd weight from sparse linear projection
+}
+
 // embeddingResult holds both dense and optional sparse embedding data.
 type embeddingResult struct {
 	dense  []float32
-	sparse map[int32]float32 // token_id -> weight, nil if no sparse support
+	sparse []sparseEntry // nil if no sparse support
 }
 
 type Sequence struct {
@@ -763,7 +770,7 @@ func (s *Server) computeBatch(activeBatch batchState) {
 
 				// Build token_id -> max(weight) map from the sparse weights.
 				// Each weight corresponds to a token in the sequence inputs.
-				sparseMap := make(map[int32]float32)
+				sparseMap := make(map[int32]sparseEntry)
 				for j, w := range sparseWeights {
 					if w <= 0 {
 						continue
@@ -772,12 +779,23 @@ func (s *Server) computeBatch(activeBatch batchState) {
 					if j < len(seq.cache.Inputs) {
 						tokenID = seq.cache.Inputs[j].Token
 					}
-					if existing, ok := sparseMap[tokenID]; !ok || w > existing {
-						sparseMap[tokenID] = w
+					if existing, ok := sparseMap[tokenID]; !ok || w > existing.Weight {
+						sparseMap[tokenID] = sparseEntry{Token: tokenID, Weight: w}
 					}
 				}
 				if len(sparseMap) > 0 {
-					result.sparse = sparseMap
+					// Decode token names using the text processor
+					textProcessor, hasTP := s.model.(model.TextProcessor)
+					entries := make([]sparseEntry, 0, len(sparseMap))
+					for _, entry := range sparseMap {
+						if hasTP {
+							if name, err := textProcessor.Decode([]int32{entry.Token}); err == nil {
+								entry.Name = name
+							}
+						}
+						entries = append(entries, entry)
+					}
+					result.sparse = entries
 				}
 			}
 
@@ -1082,9 +1100,23 @@ func (s *Server) embeddings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result := <-seq.embedding
+
+	// Convert internal sparse entries to llm type
+	var sparseEmbedding []llm.SparseEmbeddingEntry
+	if len(result.sparse) > 0 {
+		sparseEmbedding = make([]llm.SparseEmbeddingEntry, len(result.sparse))
+		for i, e := range result.sparse {
+			sparseEmbedding[i] = llm.SparseEmbeddingEntry{
+				Token:  e.Token,
+				Name:   e.Name,
+				Weight: e.Weight,
+			}
+		}
+	}
+
 	if err := json.NewEncoder(w).Encode(&llm.EmbeddingResponse{
 		Embedding:       result.dense,
-		SparseEmbedding: result.sparse,
+		SparseEmbedding: sparseEmbedding,
 		PromptEvalCount: seq.numPromptInputs,
 	}); err != nil {
 		http.Error(w, fmt.Sprintf("failed to encode response: %v", err), http.StatusInternalServerError)

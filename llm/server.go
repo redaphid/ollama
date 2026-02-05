@@ -1698,10 +1698,17 @@ type EmbeddingRequest struct {
 	Content string `json:"content"`
 }
 
+// SparseEmbeddingEntry represents a single sparse embedding entry.
+type SparseEmbeddingEntry struct {
+	Token  int32   `json:"token"`
+	Name   string  `json:"name,omitempty"`
+	Weight float32 `json:"weight"`
+}
+
 type EmbeddingResponse struct {
-	Embedding       []float32         `json:"embedding"`
-	SparseEmbedding map[int32]float32 `json:"sparse_embedding,omitempty"`
-	PromptEvalCount int               `json:"prompt_eval_count"`
+	Embedding       []float32              `json:"embedding"`
+	SparseEmbedding []SparseEmbeddingEntry `json:"sparse_embedding,omitempty"`
+	PromptEvalCount int                    `json:"prompt_eval_count"`
 }
 
 func (s *llmServer) Embedding(ctx context.Context, input string) (*EmbeddingResponse, error) {
